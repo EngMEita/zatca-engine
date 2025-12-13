@@ -222,12 +222,24 @@ final class InvoiceDocument
 
     public function qrBase64(): string
     {
+        $seller  = $this->ctx->seller();
+        $taxRate = $this->ctx->taxRate();
+
+        // Recalculate totals from items (single source of truth)
+        $net = 0.0;
+        foreach ($this->m->items as $it) {
+            $net += (float)$it['qty'] * (float)$it['price'];
+        }
+
+        $vat   = $net * ($taxRate / 100);
+        $gross = $net + $vat;
+
         return QrGenerator::generateBase64([
-            'seller_name'  => $this->ctx->seller()['name'],
-            'seller_vat'   => $this->ctx->seller()['vat'],
+            'seller_name'  => $seller['name'] ?? '',
+            'seller_vat'   => $seller['vat'] ?? '',
             'timestamp'    => $this->m->issueDate . 'T' . $this->m->issueTime,
-            'total'        => NumberHelper::money($this->ctx->total()),
-            'vat_total'    => NumberHelper::money($this->ctx->vat()),
+            'total'        => NumberHelper::money($gross),
+            'vat_total'    => NumberHelper::money($vat),
             'invoice_hash' => Sha256::hashBase64($this->canonicalXml()),
         ]);
     }
