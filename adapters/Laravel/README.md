@@ -1,0 +1,1 @@
+Laravel adapter is included via auto-discovery. Publish config with tag `zatca-engine-config`.
