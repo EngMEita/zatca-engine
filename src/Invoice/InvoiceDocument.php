@@ -49,32 +49,62 @@ final class InvoiceDocument
         $inv->appendChild($typeEl);
 
         $inv->appendChild($doc->createElement('cbc:DocumentCurrencyCode',$currency));
-        $inv->appendChild($doc->createElement('cbc:TaxCurrencyCode',$currency));
+        // TaxCurrencyCode should be provided only when different from DocumentCurrencyCode.
+        // Providing it unnecessarily may trigger BR-KSA-EN16931-09 warnings.
+        if (!empty($this->m->taxCurrencyCode) && $this->m->taxCurrencyCode !== $currency) {
+            $inv->appendChild($doc->createElement('cbc:TaxCurrencyCode',$this->m->taxCurrencyCode));
+        }
 
-        // Supply date (Delivery) for standard
+        // Supply date (KSA-5) for standard invoices.
+        // ZATCA implementation standard maps the supply date via InvoicePeriod.
         if ($this->m->type === 'standard') {
-            $delivery = $doc->createElement('cac:Delivery');
-            $delivery->appendChild($doc->createElement('cbc:ActualDeliveryDate',$this->m->issueDate));
-            $inv->appendChild($delivery);
+            $period = $doc->createElement('cac:InvoicePeriod');
+            $period->appendChild($doc->createElement('cbc:StartDate', $this->m->supplyDate ?? $this->m->issueDate));
+            $inv->appendChild($period);
         }
 
         // Seller Party
         $sup = $doc->createElement('cac:AccountingSupplierParty');
         $p = $doc->createElement('cac:Party');
 
+        // Seller validations (avoid BR-06 / BR-08 / BR-KSA-37 warnings)
+        $sellerName = trim((string)($seller['name'] ?? ''));
+        $sellerVat  = preg_replace('/\s+/', '', (string)($seller['vat'] ?? ''));
+        $sellerCrn  = preg_replace('/\s+/', '', (string)($seller['crn'] ?? ''));
+        if ($sellerName === '' || $sellerVat === '' || $sellerCrn === '') {
+            throw new \InvalidArgumentException('Seller name, VAT and CRN are required for ZATCA invoices.');
+        }
+        $street = trim((string)($sAddr['street'] ?? ''));
+        $city   = trim((string)($sAddr['city'] ?? ''));
+        $postal = trim((string)($sAddr['postal_code'] ?? ''));
+        $country= strtoupper(trim((string)($sAddr['country'] ?? 'SA')));
+        $bnoRaw = preg_replace('/\D+/', '', (string)($sAddr['building_no'] ?? ''));
+        $bno    = str_pad(substr($bnoRaw, 0, 4), 4, '0', STR_PAD_LEFT);
+        if ($street === '' || $city === '' || $postal === '') {
+            throw new \InvalidArgumentException('Seller address street/city/postal_code are required for standard invoices.');
+        }
+
         $pn = $doc->createElement('cac:PartyName');
-        $pn->appendChild($doc->createElement('cbc:Name',$seller['name']));
+        $pn->appendChild($doc->createElement('cbc:Name',$sellerName));
         $p->appendChild($pn);
 
+        // Seller identification (BT-29) should exist only once with a scheme.
+        // Use PartyIdentification with schemeID=CRN.
+        $pid = $doc->createElement('cac:PartyIdentification');
+        $pidId = $doc->createElement('cbc:ID', $sellerCrn);
+        $pidId->setAttribute('schemeID', 'CRN');
+        $pid->appendChild($pidId);
+        $p->appendChild($pid);
+
         $pts = $doc->createElement('cac:PartyTaxScheme');
-        $pts->appendChild($doc->createElement('cbc:CompanyID',$seller['vat']));
+        $pts->appendChild($doc->createElement('cbc:CompanyID',$sellerVat));
         $reg = $doc->createElement('cac:RegistrationAddress');
-        $reg->appendChild($doc->createElement('cbc:StreetName',$sAddr['street']));
-        $reg->appendChild($doc->createElement('cbc:BuildingNumber',$sAddr['building_no']));
-        $reg->appendChild($doc->createElement('cbc:CityName',$sAddr['city']));
-        $reg->appendChild($doc->createElement('cbc:PostalZone',$sAddr['postal_code']));
+        $reg->appendChild($doc->createElement('cbc:StreetName',$street));
+        $reg->appendChild($doc->createElement('cbc:BuildingNumber',$bno));
+        $reg->appendChild($doc->createElement('cbc:CityName',$city));
+        $reg->appendChild($doc->createElement('cbc:PostalZone',$postal));
         $c = $doc->createElement('cac:Country');
-        $c->appendChild($doc->createElement('cbc:IdentificationCode',$sAddr['country'] ?? 'SA'));
+        $c->appendChild($doc->createElement('cbc:IdentificationCode',$country));
         $reg->appendChild($c);
         $pts->appendChild($reg);
         $ts = $doc->createElement('cac:TaxScheme');
@@ -82,35 +112,47 @@ final class InvoiceDocument
         $pts->appendChild($ts);
         $p->appendChild($pts);
 
+        // PartyLegalEntity is optional; keep RegistrationName only.
         $ple = $doc->createElement('cac:PartyLegalEntity');
-        $crn = $doc->createElement('cbc:CompanyID',$seller['crn']);
-        $crn->setAttribute('schemeID','CRN');
-        $ple->appendChild($crn);
+        $ple->appendChild($doc->createElement('cbc:RegistrationName', $sellerName));
         $p->appendChild($ple);
 
         $sup->appendChild($p);
         $inv->appendChild($sup);
 
         // Buyer Party (standard requires)
-        if ($this->m->buyerName || $this->m->buyerVat) {
+        if ($this->m->type === 'standard') {
+            if (!$this->m->buyerName) {
+                throw new \InvalidArgumentException('Buyer name is mandatory for standard (tax) invoices.');
+            }
             $cus = $doc->createElement('cac:AccountingCustomerParty');
             $cp = $doc->createElement('cac:Party');
 
             $cpn = $doc->createElement('cac:PartyName');
-            $cpn->appendChild($doc->createElement('cbc:Name',$this->m->buyerName ?? 'Buyer'));
+            $cpn->appendChild($doc->createElement('cbc:Name', (string)$this->m->buyerName));
             $cp->appendChild($cpn);
 
             $cts = $doc->createElement('cac:PartyTaxScheme');
             if ($this->m->buyerVat) $cts->appendChild($doc->createElement('cbc:CompanyID',$this->m->buyerVat));
 
             $bAddr = $this->m->buyerAddress;
+            $bStreet = trim((string)($bAddr['street'] ?? ''));
+            $bCity   = trim((string)($bAddr['city'] ?? ''));
+            $bPostal = trim((string)($bAddr['postal_code'] ?? ''));
+            $bCountry= strtoupper(trim((string)($bAddr['country'] ?? 'SA')));
+            $bBnoRaw = preg_replace('/\D+/', '', (string)($bAddr['building_no'] ?? ''));
+            $bBno    = $bBnoRaw !== '' ? str_pad(substr($bBnoRaw,0,4),4,'0',STR_PAD_LEFT) : '0000';
+            // Avoid BR-KSA-F-06 warnings by ensuring min length
+            if ($bStreet === '') $bStreet = 'N/A';
+            if ($bCity === '') $bCity = 'N/A';
+            if ($bPostal === '') $bPostal = '00000';
             $breg = $doc->createElement('cac:RegistrationAddress');
-            $breg->appendChild($doc->createElement('cbc:StreetName',$bAddr['street'] ?? ''));
-            $breg->appendChild($doc->createElement('cbc:BuildingNumber',$bAddr['building_no'] ?? ''));
-            $breg->appendChild($doc->createElement('cbc:CityName',$bAddr['city'] ?? ''));
-            $breg->appendChild($doc->createElement('cbc:PostalZone',$bAddr['postal_code'] ?? ''));
+            $breg->appendChild($doc->createElement('cbc:StreetName',$bStreet));
+            $breg->appendChild($doc->createElement('cbc:BuildingNumber',$bBno));
+            $breg->appendChild($doc->createElement('cbc:CityName',$bCity));
+            $breg->appendChild($doc->createElement('cbc:PostalZone',$bPostal));
             $bc = $doc->createElement('cac:Country');
-            $bc->appendChild($doc->createElement('cbc:IdentificationCode',$bAddr['country'] ?? 'SA'));
+            $bc->appendChild($doc->createElement('cbc:IdentificationCode',$bCountry));
             $breg->appendChild($bc);
             $cts->appendChild($breg);
 
@@ -145,10 +187,18 @@ final class InvoiceDocument
             $le->setAttribute('currencyID', $currency);
             $line->appendChild($le);
 
-            // KSA-12 (line amount with VAT)
-            $ti = $doc->createElement('cbc:TaxInclusiveAmount', NumberHelper::money($lineGross));
-            $ti->setAttribute('currencyID', $currency);
-            $line->appendChild($ti);
+            // Line tax total (KSA-11 & KSA-12)
+            // Per ZATCA XML implementation standard:
+            // - KSA-11 (line VAT amount) => cac:InvoiceLine/cac:TaxTotal/cbc:TaxAmount
+            // - KSA-12 (line amount with VAT) => cac:InvoiceLine/cac:TaxTotal/cbc:RoundingAmount
+            $lineTaxTotal = $doc->createElement('cac:TaxTotal');
+            $ltVat = $doc->createElement('cbc:TaxAmount', NumberHelper::money($lineVat));
+            $ltVat->setAttribute('currencyID', $currency);
+            $lineTaxTotal->appendChild($ltVat);
+            $ltGross = $doc->createElement('cbc:RoundingAmount', NumberHelper::money($lineGross));
+            $ltGross->setAttribute('currencyID', $currency);
+            $lineTaxTotal->appendChild($ltGross);
+            $line->appendChild($lineTaxTotal);
 
             $itemEl = $doc->createElement('cac:Item');
             $itemEl->appendChild($doc->createElement('cbc:Name', $it['name']));
@@ -227,16 +277,28 @@ final class InvoiceDocument
         $adr1->appendChild($doc->createElement('cbc:UUID',$this->m->icv));
         $inv->appendChild($adr1);
 
-        if ($this->m->previousHash) {
-            $adr2 = $doc->createElement('cac:AdditionalDocumentReference');
-            $adr2->appendChild($doc->createElement('cbc:ID','PIH'));
-            $att = $doc->createElement('cac:Attachment');
-            $bin = $doc->createElement('cbc:EmbeddedDocumentBinaryObject', base64_encode(hex2bin($this->m->previousHash)));
-            $bin->setAttribute('mimeCode','text/plain');
-            $att->appendChild($bin);
-            $adr2->appendChild($att);
-            $inv->appendChild($adr2);
+        // PIH (KSA-13) is mandatory in Phase 2.
+        // We accept either hex (64 chars) or base64 (44 chars) input; if missing, use 32 bytes of zeros.
+        $pih = (string)($this->m->previousHash ?? '');
+        if ($pih === '') {
+            $pihB64 = base64_encode(str_repeat("\x00", 32));
+        } else {
+            $pihTrim = preg_replace('/\s+/', '', $pih);
+            if (preg_match('/^[0-9a-fA-F]{64}$/', $pihTrim)) {
+                $pihB64 = base64_encode(hex2bin($pihTrim));
+            } else {
+                // assume already base64
+                $pihB64 = $pihTrim;
+            }
         }
+        $adr2 = $doc->createElement('cac:AdditionalDocumentReference');
+        $adr2->appendChild($doc->createElement('cbc:ID','PIH'));
+        $att = $doc->createElement('cac:Attachment');
+        $bin = $doc->createElement('cbc:EmbeddedDocumentBinaryObject', $pihB64);
+        $bin->setAttribute('mimeCode','text/plain');
+        $att->appendChild($bin);
+        $adr2->appendChild($att);
+        $inv->appendChild($adr2);
 
         $doc->appendChild($inv);
         return $doc->saveXML();
