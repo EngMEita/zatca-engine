@@ -194,22 +194,8 @@ final class InvoiceDocument
 
         $grossTotal = $netTotal + $vatTotal;
 
-        /* ================= TAX TOTAL (BG-23 required) ================= */
-        $taxTotal = $x->add($inv, 'cac:TaxTotal');
-        $x->add($taxTotal, 'cbc:TaxAmount', $x->money($vatTotal), ['currencyID' => $currency]);
-
-        /* ================= LEGAL MONETARY TOTAL ================= */
-        $legal = $x->add($inv, 'cac:LegalMonetaryTotal');
-        $x->add($legal, 'cbc:LineExtensionAmount', $x->money($netTotal), ['currencyID' => $currency]);
-        $x->add($legal, 'cbc:TaxExclusiveAmount', $x->money($netTotal), ['currencyID' => $currency]);
-        $x->add($legal, 'cbc:TaxInclusiveAmount', $x->money($grossTotal), ['currencyID' => $currency]);
-        $x->add($legal, 'cbc:PayableAmount', $x->money($grossTotal), ['currencyID' => $currency]);
-
         /* ================= ADDITIONAL DOC REF (Phase 2) =================
-           IMPORTANT ORDER:
-           In many validators, AdditionalDocumentReference should be before InvoiceLine.
-           But your validator errors were mostly around InvoiceLine positioning relative to TaxTotal/LegalMonetaryTotal.
-           We keep this order: TaxTotal -> LegalMonetaryTotal -> ADRs -> InvoiceLines
+           Place ADRs before totals/lines to satisfy UBL ordering.
         */
 
         // ICV (KSA-16)
@@ -223,7 +209,28 @@ final class InvoiceDocument
         $att = $x->add($adrPih, 'cac:Attachment');
         $x->add($att, 'cbc:EmbeddedDocumentBinaryObject', $pihB64, ['mimeCode' => 'text/plain']);
 
-        /* ================= INVOICE LINES (must be after totals for XSD) ================= */
+        /* ================= TAX TOTAL (BG-23 required) ================= */
+        $taxTotal = $x->add($inv, 'cac:TaxTotal');
+        $x->add($taxTotal, 'cbc:TaxAmount', $x->money($vatTotal), ['currencyID' => $currency]);
+
+        $sub = $x->add($taxTotal, 'cac:TaxSubtotal');
+        $x->add($sub, 'cbc:TaxableAmount', $x->money($netTotal), ['currencyID' => $currency]);
+        $x->add($sub, 'cbc:TaxAmount', $x->money($vatTotal), ['currencyID' => $currency]);
+
+        $cat = $x->add($sub, 'cac:TaxCategory');
+        $x->add($cat, 'cbc:ID', 'S');
+        $x->add($cat, 'cbc:Percent', $this->formatPercent($taxRate));
+        $catTs = $x->add($cat, 'cac:TaxScheme');
+        $x->add($catTs, 'cbc:ID', 'VAT');
+
+        /* ================= LEGAL MONETARY TOTAL ================= */
+        $legal = $x->add($inv, 'cac:LegalMonetaryTotal');
+        $x->add($legal, 'cbc:LineExtensionAmount', $x->money($netTotal), ['currencyID' => $currency]);
+        $x->add($legal, 'cbc:TaxExclusiveAmount', $x->money($netTotal), ['currencyID' => $currency]);
+        $x->add($legal, 'cbc:TaxInclusiveAmount', $x->money($grossTotal), ['currencyID' => $currency]);
+        $x->add($legal, 'cbc:PayableAmount', $x->money($grossTotal), ['currencyID' => $currency]);
+
+        /* ================= INVOICE LINES (after totals for XSD) ================= */
         foreach ($lines as $line) {
             $inv->appendChild($line);
         }
