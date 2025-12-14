@@ -22,8 +22,8 @@ final class InvoiceDocument
 
         $currency = $this->ctx->currency();
         $taxRate  = (float)$this->ctx->taxRate();
+        // BR-KSA-68: TaxCurrencyCode must exist; when present, BR-KSA-EN16931-09 requires no TaxSubtotal
         $taxCurrency = $this->m->taxCurrencyCode ?? $currency;
-        $hasTaxCurrencyOverride = $this->m->taxCurrencyCode !== null && $taxCurrency !== $currency;
 
         $seller = $this->ctx->seller();
         $sAddr  = $seller['address'] ?? [];
@@ -31,7 +31,8 @@ final class InvoiceDocument
         // ---- Strict mandatory seller fields (avoid BR-06/BR-08/BR-KSA-37 + Phase2)
         $sellerName = $x->requireNonEmpty('Seller Name', $seller['name'] ?? null);
         $sellerVat  = preg_replace('/\s+/', '', $x->requireNonEmpty('Seller VAT', $seller['vat'] ?? null));
-        $sellerCrn  = preg_replace('/\s+/', '', $x->requireNonEmpty('Seller CRN', $seller['crn'] ?? null));
+        // Ensure CRN is alphanumeric only to satisfy BR-KSA-08
+        $sellerCrn  = preg_replace('/[^A-Za-z0-9]/', '', $x->requireNonEmpty('Seller CRN', $seller['crn'] ?? null));
 
         $isStandard = ($this->m->type === 'standard');
 
@@ -217,18 +218,7 @@ final class InvoiceDocument
         $taxTotal = $x->add($inv, 'cac:TaxTotal');
         $x->add($taxTotal, 'cbc:TaxAmount', $x->money($vatTotal), ['currencyID' => $currency]);
 
-        // BR-KSA-EN16931-09 interpretation: if tax currency differs, omit TaxSubtotal; otherwise include BG-23
-        if (!$hasTaxCurrencyOverride) {
-            $sub = $x->add($taxTotal, 'cac:TaxSubtotal');
-            $x->add($sub, 'cbc:TaxableAmount', $x->money($netTotal), ['currencyID' => $currency]);
-            $x->add($sub, 'cbc:TaxAmount', $x->money($vatTotal), ['currencyID' => $currency]);
-
-            $cat = $x->add($sub, 'cac:TaxCategory');
-            $x->add($cat, 'cbc:ID', 'S');
-            $x->add($cat, 'cbc:Percent', $this->formatPercent($taxRate));
-            $catTs = $x->add($cat, 'cac:TaxScheme');
-            $x->add($catTs, 'cbc:ID', 'VAT');
-        }
+        // BR-KSA-EN16931-09: when TaxCurrencyCode is provided, do not include TaxSubtotal (BG-23)
 
         /* ================= LEGAL MONETARY TOTAL ================= */
         $legal = $x->add($inv, 'cac:LegalMonetaryTotal');

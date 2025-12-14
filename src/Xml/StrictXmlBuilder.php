@@ -109,6 +109,9 @@ final class StrictXmlBuilder
         if ($district === '') {
             $district = 'N/A';
         }
+        if (strlen($district) > 127) {
+            $district = substr($district, 0, 127);
+        }
 
         $pa = $this->add($party, 'cac:PostalAddress');
         $this->add($pa, 'cbc:StreetName', $street);
