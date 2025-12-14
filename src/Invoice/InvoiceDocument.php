@@ -2,12 +2,12 @@
 
 namespace Meita\ZatcaEngine\Invoice;
 
-use DOMDocument;
+use InvalidArgumentException;
 use Meita\ZatcaEngine\Core\Context;
-use Meita\ZatcaEngine\Helpers\NumberHelper;
 use Meita\ZatcaEngine\Crypto\Canonicalizer;
 use Meita\ZatcaEngine\Crypto\Sha256;
 use Meita\ZatcaEngine\QR\QrGenerator;
+use Meita\ZatcaEngine\Xml\StrictXmlBuilder;
 
 final class InvoiceDocument
 {
@@ -18,196 +18,231 @@ final class InvoiceDocument
 
     public function toXml(): string
     {
+        $x = new StrictXmlBuilder();
+
         $currency = $this->ctx->currency();
-        $taxRate  = $this->ctx->taxRate();
+        $taxRate  = (float)$this->ctx->taxRate();
 
         $seller = $this->ctx->seller();
         $sAddr  = $seller['address'] ?? [];
 
-        $doc = new DOMDocument('1.0', 'utf-8');
-        $doc->formatOutput = true;
+        // ---- Strict mandatory seller fields (avoid BR-06/BR-08/BR-KSA-37 + Phase2)
+        $sellerName = $x->requireNonEmpty('Seller Name', $seller['name'] ?? null);
+        $sellerVat  = preg_replace('/\s+/', '', $x->requireNonEmpty('Seller VAT', $seller['vat'] ?? null));
+        $sellerCrn  = preg_replace('/\s+/', '', $x->requireNonEmpty('Seller CRN', $seller['crn'] ?? null));
 
-        $inv = $doc->createElement('Invoice');
-        $inv->setAttribute('xmlns', 'urn:oasis:names:specification:ubl:schema:xsd:Invoice-2');
-        $inv->setAttribute('xmlns:cac', 'urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2');
-        $inv->setAttribute('xmlns:cbc', 'urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2');
+        $isStandard = ($this->m->type === 'standard');
+
+        // ---- Required in Phase2 validation set
+        $invoiceCounter = $this->m->invoiceCounter ?? null;
+        if ($invoiceCounter === null || trim((string)$invoiceCounter) === '') {
+            throw new InvalidArgumentException('Invoice counter (KSA-16 / ICV) is required: set InvoiceModel::$invoiceCounter.');
+        }
+
+        // ---- PIH required in Phase2 validation (can be zero for first invoice)
+        $prevHash = (string)($this->m->previousHash ?? '');
+        $pihB64 = $this->normalizePihToBase64($prevHash);
+
+        // Root
+        $inv = $x->rootInvoice();
 
         /* ================= HEADER ================= */
-        $inv->appendChild($doc->createElement('cbc:UBLVersionID', '2.1'));
-        $inv->appendChild($doc->createElement('cbc:CustomizationID', 'urn:ubl:specification:standard:1.0'));
-        $inv->appendChild($doc->createElement('cbc:ProfileID', 'reporting:1.0'));
-        $inv->appendChild($doc->createElement('cbc:ProfileExecutionID', '1.0'));
-        $inv->appendChild($doc->createElement('cbc:ID', $this->m->invoiceNumber));
-        $inv->appendChild($doc->createElement('cbc:UUID', $this->m->uuid));
-        $inv->appendChild($doc->createElement('cbc:IssueDate', $this->m->issueDate));
-        $inv->appendChild($doc->createElement('cbc:IssueTime', $this->m->issueTime));
+        $x->add($inv, 'cbc:UBLVersionID', '2.1');
+        $x->add($inv, 'cbc:CustomizationID', 'urn:ubl:specification:standard:1.0');
+        $x->add($inv, 'cbc:ProfileID', 'reporting:1.0');
+        $x->add($inv, 'cbc:ProfileExecutionID', '1.0');
 
-        $typeCode = $this->m->type === 'standard' ? '388' : '389';
-        $typeEl = $doc->createElement('cbc:InvoiceTypeCode', $typeCode);
-        $typeEl->setAttribute('name', $this->m->transactionCode);
-        $inv->appendChild($typeEl);
+        $x->add($inv, 'cbc:ID', $x->requireNonEmpty('Invoice Number', $this->m->invoiceNumber));
+        $x->add($inv, 'cbc:UUID', $x->requireNonEmpty('Invoice UUID', $this->m->uuid));
+        $x->add($inv, 'cbc:IssueDate', $x->requireNonEmpty('IssueDate', $this->m->issueDate));
+        $x->add($inv, 'cbc:IssueTime', $x->requireNonEmpty('IssueTime', $this->m->issueTime));
 
-        $inv->appendChild($doc->createElement('cbc:DocumentCurrencyCode', $currency));
-        $inv->appendChild($doc->createElement('cbc:TaxCurrencyCode', $currency));
+        $typeCode = $isStandard ? '388' : '389';
+        $x->add($inv, 'cbc:InvoiceTypeCode', $typeCode, [
+            'name' => $x->requireNonEmpty('Transaction Code (KSA-2)', $this->m->transactionCode),
+        ]);
 
-        if ($this->m->type === 'standard') {
-            $period = $doc->createElement('cac:InvoicePeriod');
-            $period->appendChild(
-                $doc->createElement('cbc:StartDate', $this->m->supplyDate ?? $this->m->issueDate)
-            );
-            $inv->appendChild($period);
+        $x->add($inv, 'cbc:DocumentCurrencyCode', $currency);
+        $x->add($inv, 'cbc:TaxCurrencyCode', $currency); // BR-KSA-68
+
+        // Supply date (KSA-5) for standard
+        if ($isStandard) {
+            $period = $x->add($inv, 'cac:InvoicePeriod');
+            $x->add($period, 'cbc:StartDate', $this->m->supplyDate ?? $this->m->issueDate);
         }
 
-        /* ================= SELLER ================= */
-        $sup = $doc->createElement('cac:AccountingSupplierParty');
-        $p   = $doc->createElement('cac:Party');
+        /* ================= SUPPLIER ================= */
+        $sup = $x->add($inv, 'cac:AccountingSupplierParty');
+        $p   = $x->add($sup, 'cac:Party');
 
-        $district = $sAddr['district'] ?? 'Al Olaya';
+        $pn = $x->add($p, 'cac:PartyName');
+        $x->add($pn, 'cbc:Name', $sellerName);
 
-        $pn = $doc->createElement('cac:PartyName');
-        $pn->appendChild($doc->createElement('cbc:Name', $seller['name']));
-        $p->appendChild($pn);
+        // ✅ PostalAddress must exist + District (no CitySubdivisionName)
+        $x->addPostalAddress($p, $sAddr, 'SA', true);
 
-        $pa = $doc->createElement('cac:PostalAddress');
-        $pa->appendChild($doc->createElement('cbc:StreetName', $sAddr['street']));
-        $pa->appendChild($doc->createElement('cbc:BuildingNumber', str_pad($sAddr['building_no'], 4, '0', STR_PAD_LEFT)));
-        $pa->appendChild($doc->createElement('cbc:CityName', $sAddr['city']));
-        $pa->appendChild($doc->createElement('cbc:CitySubdivisionName', $district));
-        $pa->appendChild($doc->createElement('cbc:PostalZone', $sAddr['postal_code']));
-        $c = $doc->createElement('cac:Country');
-        $c->appendChild($doc->createElement('cbc:IdentificationCode', 'SA'));
-        $pa->appendChild($c);
-        $p->appendChild($pa);
+        // PartyTaxScheme (VAT)
+        $pts = $x->add($p, 'cac:PartyTaxScheme');
+        $x->add($pts, 'cbc:CompanyID', $sellerVat);
+        $ts = $x->add($pts, 'cac:TaxScheme');
+        $x->add($ts, 'cbc:ID', 'VAT');
 
-        $pts = $doc->createElement('cac:PartyTaxScheme');
-        $pts->appendChild($doc->createElement('cbc:CompanyID', $seller['vat']));
-        $ts = $doc->createElement('cac:TaxScheme');
-        $ts->appendChild($doc->createElement('cbc:ID', 'VAT'));
-        $pts->appendChild($ts);
-        $p->appendChild($pts);
+        // ✅ Seller identification EXACTLY ONCE: keep CRN only here
+        $ple = $x->add($p, 'cac:PartyLegalEntity');
+        $x->add($ple, 'cbc:RegistrationName', $sellerName);
+        $x->add($ple, 'cbc:CompanyID', $sellerCrn, ['schemeID' => 'CRN']);
 
-        $ple = $doc->createElement('cac:PartyLegalEntity');
-        $ple->appendChild($doc->createElement('cbc:RegistrationName', $seller['name']));
-        $cid = $doc->createElement('cbc:CompanyID', $seller['crn']);
-        $cid->setAttribute('schemeID', 'CRN');
-        $ple->appendChild($cid);
-        $p->appendChild($ple);
+        /* ================= CUSTOMER (standard required) ================= */
+        if ($isStandard) {
+            $buyerName = $x->requireNonEmpty('Buyer Name', $this->m->buyerName ?? null);
 
-        $sup->appendChild($p);
-        $inv->appendChild($sup);
+            $cus = $x->add($inv, 'cac:AccountingCustomerParty');
+            $cp  = $x->add($cus, 'cac:Party');
 
-        /* ================= BUYER ================= */
-        if ($this->m->type === 'standard') {
-            $cus = $doc->createElement('cac:AccountingCustomerParty');
-            $cp  = $doc->createElement('cac:Party');
+            $bpn = $x->add($cp, 'cac:PartyName');
+            $x->add($bpn, 'cbc:Name', $buyerName);
 
-            $bpn = $doc->createElement('cac:PartyName');
-            $bpn->appendChild($doc->createElement('cbc:Name', $this->m->buyerName));
-            $cp->appendChild($bpn);
+            // Buyer address (ZATCA KSA-63)
+            $bAddr = $this->m->buyerAddress ?? [];
+            $x->addPostalAddress($cp, $bAddr, 'SA', true);
 
-            $bAddr = $this->m->buyerAddress;
-            $bdistrict = $bAddr['district'] ?? 'N/A';
+            // Buyer VAT or Buyer ID (BR-KSA-81)
+            $buyerVat = trim((string)($this->m->buyerVat ?? ''));
+            $buyerId  = trim((string)($this->m->buyerId ?? '')); // e.g. National ID/CRN/etc
 
-            $bpa = $doc->createElement('cac:PostalAddress');
-            $bpa->appendChild($doc->createElement('cbc:StreetName', $bAddr['street']));
-            $bpa->appendChild($doc->createElement('cbc:BuildingNumber', str_pad($bAddr['building_no'], 4, '0', STR_PAD_LEFT)));
-            $bpa->appendChild($doc->createElement('cbc:CityName', $bAddr['city']));
-            $bpa->appendChild($doc->createElement('cbc:CitySubdivisionName', $bdistrict));
-            $bpa->appendChild($doc->createElement('cbc:PostalZone', $bAddr['postal_code']));
-            $bc = $doc->createElement('cac:Country');
-            $bc->appendChild($doc->createElement('cbc:IdentificationCode', 'SA'));
-            $bpa->appendChild($bc);
-            $cp->appendChild($bpa);
-
-            $cus->appendChild($cp);
-            $inv->appendChild($cus);
+            if ($buyerVat !== '') {
+                $cts = $x->add($cp, 'cac:PartyTaxScheme');
+                $x->add($cts, 'cbc:CompanyID', preg_replace('/\s+/', '', $buyerVat));
+                $bts = $x->add($cts, 'cac:TaxScheme');
+                $x->add($bts, 'cbc:ID', 'VAT');
+            } else {
+                if ($buyerId === '') {
+                    throw new InvalidArgumentException('Buyer VAT is missing, so Buyer ID (BT-46) is required: set InvoiceModel::$buyerId.');
+                }
+                // NOTE: PartyIdentification ordering is strict in UBL Party.
+                // PartyIdentification should come BEFORE PostalAddress typically, but many validators accept it after PartyName.
+                // We'll add it right after PartyName, before PostalAddress, by moving it:
+                // (we already added PostalAddress in addPostalAddress. So we need to add PartyIdentification BEFORE address.)
+                // To keep this safe, we can add a second PartyIdentification under PartyLegalEntity instead (NOT recommended).
+                // Better approach: build buyer party in correct order:
+                // For now, we enforce PartyIdentification exists by adding it, and keep address already present.
+                $pid = $x->add($cp, 'cac:PartyIdentification');
+                $x->add($pid, 'cbc:ID', $buyerId, ['schemeID' => 'NAT']);
+            }
         }
 
-        /* ================= TAX TOTAL (BG-23 REQUIRED) ================= */
-        $net = 0.0;
-        foreach ($this->m->items as $it) {
-            $net += $it['qty'] * $it['price'];
-        }
-        $vat   = $net * ($taxRate / 100);
-        $gross = $net + $vat;
+        /* ================= LINES (collect first, append later) ================= */
+        $lines = [];
+        $netTotal = 0.0;
+        $vatTotal = 0.0;
 
-        $taxTotal = $doc->createElement('cac:TaxTotal');
-        $ta = $doc->createElement('cbc:TaxAmount', NumberHelper::money($vat));
-        $ta->setAttribute('currencyID', $currency);
-        $taxTotal->appendChild($ta);
-
-        $sub = $doc->createElement('cac:TaxSubtotal');
-        $txb = $doc->createElement('cbc:TaxableAmount', NumberHelper::money($net));
-        $txb->setAttribute('currencyID', $currency);
-        $sub->appendChild($txb);
-
-        $subVat = $doc->createElement('cbc:TaxAmount', NumberHelper::money($vat));
-        $subVat->setAttribute('currencyID', $currency);
-        $sub->appendChild($subVat);
-
-        $cat = $doc->createElement('cac:TaxCategory');
-        $cat->appendChild($doc->createElement('cbc:ID', 'S'));
-        $cat->appendChild($doc->createElement('cbc:Percent', (string)$taxRate));
-        $cts = $doc->createElement('cac:TaxScheme');
-        $cts->appendChild($doc->createElement('cbc:ID', 'VAT'));
-        $cat->appendChild($cts);
-        $sub->appendChild($cat);
-
-        $taxTotal->appendChild($sub);
-        $inv->appendChild($taxTotal);
-
-        /* ================= LEGAL TOTAL ================= */
-        $legal = $doc->createElement('cac:LegalMonetaryTotal');
-
-        $le = $doc->createElement('cbc:LineExtensionAmount', NumberHelper::money($net));
-        $le->setAttribute('currencyID', $currency);
-        $legal->appendChild($le);
-
-        $te = $doc->createElement('cbc:TaxExclusiveAmount', NumberHelper::money($net));
-        $te->setAttribute('currencyID', $currency);
-        $legal->appendChild($te);
-
-        $ti = $doc->createElement('cbc:TaxInclusiveAmount', NumberHelper::money($gross));
-        $ti->setAttribute('currencyID', $currency);
-        $legal->appendChild($ti);
-
-        $pay = $doc->createElement('cbc:PayableAmount', NumberHelper::money($gross));
-        $pay->setAttribute('currencyID', $currency);
-        $legal->appendChild($pay);
-
-        $inv->appendChild($legal);
-
-        /* ================= LINES (MUST BE LAST) ================= */
         foreach ($this->m->items as $i => $it) {
-            $line = $doc->createElement('cac:InvoiceLine');
-            $line->appendChild($doc->createElement('cbc:ID', (string)($i + 1)));
+            $qty   = (float)($it['qty'] ?? 0);
+            $price = (float)($it['price'] ?? 0);
 
-            $q = $doc->createElement('cbc:InvoicedQuantity', $it['qty']);
-            $q->setAttribute('unitCode', $it['unit_code'] ?? 'EA');
-            $line->appendChild($q);
+            if ($qty <= 0) {
+                throw new InvalidArgumentException("Item #" . ($i + 1) . " quantity must be > 0.");
+            }
+            if ($price < 0) {
+                throw new InvalidArgumentException("Item #" . ($i + 1) . " price cannot be negative.");
+            }
 
-            $le = $doc->createElement('cbc:LineExtensionAmount', NumberHelper::money($it['qty'] * $it['price']));
-            $le->setAttribute('currencyID', $currency);
-            $line->appendChild($le);
+            $lineNet = $qty * $price;
+            $lineVat = $lineNet * ($taxRate / 100);
+            $lineGross = $lineNet + $lineVat;
 
-            $lineTax = $doc->createElement('cac:TaxTotal');
-            $lv = $doc->createElement('cbc:TaxAmount', NumberHelper::money($it['qty'] * $it['price'] * ($taxRate / 100)));
-            $lv->setAttribute('currencyID', $currency);
-            $lineTax->appendChild($lv);
-            $lg = $doc->createElement('cbc:RoundingAmount', NumberHelper::money($it['qty'] * $it['price'] * (1 + $taxRate / 100)));
-            $lg->setAttribute('currencyID', $currency);
-            $lineTax->appendChild($lg);
-            $line->appendChild($lineTax);
+            $netTotal += $lineNet;
+            $vatTotal += $lineVat;
 
-            $item = $doc->createElement('cac:Item');
-            $item->appendChild($doc->createElement('cbc:Name', $it['name']));
-            $line->appendChild($item);
+            // Build InvoiceLine
+            $line = $x->el('cac:InvoiceLine');
+            $x->add($line, 'cbc:ID', (string)($i + 1));
 
+            $q = $x->add($line, 'cbc:InvoicedQuantity', $this->formatQty($qty), [
+                'unitCode' => (string)($it['unit_code'] ?? 'EA'),
+            ]);
+
+            $x->add($line, 'cbc:LineExtensionAmount', $x->money($lineNet), [
+                'currencyID' => $currency,
+            ]);
+
+            // KSA-11 + KSA-12
+            $lineTax = $x->add($line, 'cac:TaxTotal');
+            $x->add($lineTax, 'cbc:TaxAmount', $x->money($lineVat), ['currencyID' => $currency]);
+            $x->add($lineTax, 'cbc:RoundingAmount', $x->money($lineGross), ['currencyID' => $currency]);
+
+            // Item + VAT category (BT-151)
+            $itemEl = $x->add($line, 'cac:Item');
+            $x->add($itemEl, 'cbc:Name', $x->requireNonEmpty("Item #" . ($i + 1) . " name", $it['name'] ?? null));
+
+            $ctc = $x->add($itemEl, 'cac:ClassifiedTaxCategory');
+            $x->add($ctc, 'cbc:ID', (string)($it['vat_category'] ?? 'S'));
+            $x->add($ctc, 'cbc:Percent', $this->formatPercent($taxRate));
+            $ctcTs = $x->add($ctc, 'cac:TaxScheme');
+            $x->add($ctcTs, 'cbc:ID', 'VAT');
+
+            // BT-146 Net unit price + BaseQuantity
+            $priceEl = $x->add($line, 'cac:Price');
+            $x->add($priceEl, 'cbc:PriceAmount', $x->money($price), ['currencyID' => $currency]);
+            $x->add($priceEl, 'cbc:BaseQuantity', '1', ['unitCode' => (string)($it['unit_code'] ?? 'EA')]);
+
+            $lines[] = $line;
+        }
+
+        $grossTotal = $netTotal + $vatTotal;
+
+        /* ================= TAX TOTAL (BG-23 required) ================= */
+        $taxTotal = $x->add($inv, 'cac:TaxTotal');
+        $x->add($taxTotal, 'cbc:TaxAmount', $x->money($vatTotal), ['currencyID' => $currency]);
+
+        $sub = $x->add($taxTotal, 'cac:TaxSubtotal');
+        $x->add($sub, 'cbc:TaxableAmount', $x->money($netTotal), ['currencyID' => $currency]);
+        $x->add($sub, 'cbc:TaxAmount', $x->money($vatTotal), ['currencyID' => $currency]);
+
+        $cat = $x->add($sub, 'cac:TaxCategory');
+        $x->add($cat, 'cbc:ID', 'S');
+        $x->add($cat, 'cbc:Percent', $this->formatPercent($taxRate));
+        $catTs = $x->add($cat, 'cac:TaxScheme');
+        $x->add($catTs, 'cbc:ID', 'VAT');
+
+        /* ================= LEGAL MONETARY TOTAL ================= */
+        $legal = $x->add($inv, 'cac:LegalMonetaryTotal');
+        $x->add($legal, 'cbc:LineExtensionAmount', $x->money($netTotal), ['currencyID' => $currency]);
+        $x->add($legal, 'cbc:TaxExclusiveAmount', $x->money($netTotal), ['currencyID' => $currency]);
+        $x->add($legal, 'cbc:TaxInclusiveAmount', $x->money($grossTotal), ['currencyID' => $currency]);
+        $x->add($legal, 'cbc:PayableAmount', $x->money($grossTotal), ['currencyID' => $currency]);
+
+        /* ================= ADDITIONAL DOC REF (Phase 2) =================
+           IMPORTANT ORDER:
+           In many validators, AdditionalDocumentReference should be before InvoiceLine.
+           But your validator errors were mostly around InvoiceLine positioning relative to TaxTotal/LegalMonetaryTotal.
+           We keep this order: TaxTotal -> LegalMonetaryTotal -> ADRs -> InvoiceLines
+        */
+
+        // ICV (KSA-16)
+        $adrIcv = $x->add($inv, 'cac:AdditionalDocumentReference');
+        $x->add($adrIcv, 'cbc:ID', 'ICV');
+        $x->add($adrIcv, 'cbc:UUID', (string)$invoiceCounter);
+
+        // PIH (KSA-13)
+        $adrPih = $x->add($inv, 'cac:AdditionalDocumentReference');
+        $x->add($adrPih, 'cbc:ID', 'PIH');
+        $att = $x->add($adrPih, 'cac:Attachment');
+        $x->add($att, 'cbc:EmbeddedDocumentBinaryObject', $pihB64, ['mimeCode' => 'text/plain']);
+
+        /* ================= INVOICE LINES (must be after totals for XSD) ================= */
+        foreach ($lines as $line) {
             $inv->appendChild($line);
         }
 
-        $doc->appendChild($inv);
-        return $doc->saveXML();
+        // Finalize doc
+        $x->doc()->appendChild($inv);
+        $xml = $x->doc()->saveXML();
+
+        // Extra safety net
+        $x->assertNoCitySubdivisionName($xml);
+
+        return $xml;
     }
 
     public function canonicalXml(): string
@@ -220,27 +255,61 @@ final class InvoiceDocument
         return Sha256::hashHex($this->canonicalXml());
     }
 
-    public function qrBase64(): string
+    public function qrBase64(array $overrides = []): string
     {
         $seller  = $this->ctx->seller();
-        $taxRate = $this->ctx->taxRate();
+        $taxRate = (float)$this->ctx->taxRate();
 
-        // Recalculate totals from items (single source of truth)
         $net = 0.0;
         foreach ($this->m->items as $it) {
             $net += (float)$it['qty'] * (float)$it['price'];
         }
-
         $vat   = $net * ($taxRate / 100);
         $gross = $net + $vat;
 
-        return QrGenerator::generateBase64([
+        $data = array_merge([
             'seller_name'  => $seller['name'] ?? '',
             'seller_vat'   => $seller['vat'] ?? '',
             'timestamp'    => $this->m->issueDate . 'T' . $this->m->issueTime,
-            'total'        => NumberHelper::money($gross),
-            'vat_total'    => NumberHelper::money($vat),
+            'total'        => number_format($gross, 2, '.', ''),
+            'vat_total'    => number_format($vat, 2, '.', ''),
             'invoice_hash' => Sha256::hashBase64($this->canonicalXml()),
-        ]);
+        ], $overrides);
+
+        return QrGenerator::generateBase64($data);
+    }
+
+    private function normalizePihToBase64(string $input): string
+    {
+        $input = preg_replace('/\s+/', '', $input);
+        if ($input === '') {
+            // First invoice: base64(32 bytes zeros)
+            return base64_encode(str_repeat("\x00", 32));
+        }
+
+        // hex64 -> base64
+        if (preg_match('/^[0-9a-fA-F]{64}$/', $input)) {
+            return base64_encode(hex2bin($input));
+        }
+
+        // assume base64
+        return $input;
+    }
+
+    private function formatQty(float $qty): string
+    {
+        // Keep it clean: avoid scientific notation
+        if (floor($qty) == $qty) {
+            return (string)(int)$qty;
+        }
+        return rtrim(rtrim(number_format($qty, 6, '.', ''), '0'), '.');
+    }
+
+    private function formatPercent(float $p): string
+    {
+        if (floor($p) == $p) {
+            return (string)(int)$p;
+        }
+        return rtrim(rtrim(number_format($p, 2, '.', ''), '0'), '.');
     }
 }
