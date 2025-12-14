@@ -72,6 +72,21 @@ final class InvoiceDocument
             $x->add($period, 'cbc:StartDate', $this->m->supplyDate ?? $this->m->issueDate);
         }
 
+        /* ================= ADDITIONAL DOC REF (Phase 2) =================
+           Place ADRs before parties/totals/lines to satisfy UBL ordering.
+        */
+
+        // ICV (KSA-16)
+        $adrIcv = $x->add($inv, 'cac:AdditionalDocumentReference');
+        $x->add($adrIcv, 'cbc:ID', 'ICV');
+        $x->add($adrIcv, 'cbc:UUID', (string)$invoiceCounter);
+
+        // PIH (KSA-13)
+        $adrPih = $x->add($inv, 'cac:AdditionalDocumentReference');
+        $x->add($adrPih, 'cbc:ID', 'PIH');
+        $att = $x->add($adrPih, 'cac:Attachment');
+        $x->add($att, 'cbc:EmbeddedDocumentBinaryObject', $pihB64, ['mimeCode' => 'text/plain']);
+
         /* ================= SUPPLIER ================= */
         $sup = $x->add($inv, 'cac:AccountingSupplierParty');
         $p   = $x->add($sup, 'cac:Party');
@@ -214,15 +229,18 @@ final class InvoiceDocument
         $taxTotal = $x->add($inv, 'cac:TaxTotal');
         $x->add($taxTotal, 'cbc:TaxAmount', $x->money($vatTotal), ['currencyID' => $currency]);
 
-        $sub = $x->add($taxTotal, 'cac:TaxSubtotal');
-        $x->add($sub, 'cbc:TaxableAmount', $x->money($netTotal), ['currencyID' => $currency]);
-        $x->add($sub, 'cbc:TaxAmount', $x->money($vatTotal), ['currencyID' => $currency]);
+        // BR-KSA-EN16931-09: when TaxCurrencyCode is present, omit TaxSubtotal
+        if ($taxCurrency === null) {
+            $sub = $x->add($taxTotal, 'cac:TaxSubtotal');
+            $x->add($sub, 'cbc:TaxableAmount', $x->money($netTotal), ['currencyID' => $currency]);
+            $x->add($sub, 'cbc:TaxAmount', $x->money($vatTotal), ['currencyID' => $currency]);
 
-        $cat = $x->add($sub, 'cac:TaxCategory');
-        $x->add($cat, 'cbc:ID', 'S');
-        $x->add($cat, 'cbc:Percent', $this->formatPercent($taxRate));
-        $catTs = $x->add($cat, 'cac:TaxScheme');
-        $x->add($catTs, 'cbc:ID', 'VAT');
+            $cat = $x->add($sub, 'cac:TaxCategory');
+            $x->add($cat, 'cbc:ID', 'S');
+            $x->add($cat, 'cbc:Percent', $this->formatPercent($taxRate));
+            $catTs = $x->add($cat, 'cac:TaxScheme');
+            $x->add($catTs, 'cbc:ID', 'VAT');
+        }
 
         /* ================= LEGAL MONETARY TOTAL ================= */
         $legal = $x->add($inv, 'cac:LegalMonetaryTotal');
