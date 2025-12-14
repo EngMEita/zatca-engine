@@ -67,8 +67,14 @@ final class InvoiceDocument
         $x->add($inv, 'cbc:DocumentCurrencyCode', $currency);
         $x->add($inv, 'cbc:TaxCurrencyCode', $taxCurrency); // BR-KSA-68 requires presence
 
+        // Supply date (KSA-5) for standard
+        if ($isStandard) {
+            $period = $x->add($inv, 'cac:InvoicePeriod');
+            $x->add($period, 'cbc:StartDate', $this->m->supplyDate ?? $this->m->issueDate);
+        }
+
         /* ================= ADDITIONAL DOC REF (Phase 2) =================
-           Place ADRs immediately after currency codes (before periods/parties/totals/lines) to satisfy UBL ordering.
+           Place ADRs after InvoicePeriod but before parties/totals/lines.
         */
 
         // ICV (KSA-16)
@@ -81,12 +87,6 @@ final class InvoiceDocument
         $x->add($adrPih, 'cbc:ID', 'PIH');
         $att = $x->add($adrPih, 'cac:Attachment');
         $x->add($att, 'cbc:EmbeddedDocumentBinaryObject', $pihB64, ['mimeCode' => 'text/plain']);
-
-        // Supply date (KSA-5) for standard
-        if ($isStandard) {
-            $period = $x->add($inv, 'cac:InvoicePeriod');
-            $x->add($period, 'cbc:StartDate', $this->m->supplyDate ?? $this->m->issueDate);
-        }
 
         /* ================= SUPPLIER ================= */
         $sup = $x->add($inv, 'cac:AccountingSupplierParty');
@@ -186,6 +186,12 @@ final class InvoiceDocument
             $x->add($line, 'cbc:LineExtensionAmount', $x->money($lineNet), [
                 'currencyID' => $currency,
             ]);
+
+            // Line-level VAT amount (KSA-11)
+            $lineTax = $x->add($line, 'cac:TaxTotal');
+            $x->add($lineTax, 'cbc:TaxAmount', $x->money($lineVat), ['currencyID' => $currency]);
+            // Line amount with VAT (KSA-12)
+            $x->add($lineTax, 'cbc:RoundingAmount', $x->money($lineGross), ['currencyID' => $currency]);
 
             // Item + VAT category (BT-151)
             $itemEl = $x->add($line, 'cac:Item');
