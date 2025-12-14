@@ -22,6 +22,7 @@ final class InvoiceDocument
 
         $currency = $this->ctx->currency();
         $taxRate  = (float)$this->ctx->taxRate();
+        $taxCurrency = $this->m->taxCurrencyCode;
 
         $seller = $this->ctx->seller();
         $sAddr  = $seller['address'] ?? [];
@@ -63,7 +64,9 @@ final class InvoiceDocument
         ]);
 
         $x->add($inv, 'cbc:DocumentCurrencyCode', $currency);
-        $x->add($inv, 'cbc:TaxCurrencyCode', $currency); // BR-KSA-68
+        if ($taxCurrency !== null && $taxCurrency !== $currency) {
+            $x->add($inv, 'cbc:TaxCurrencyCode', $taxCurrency);
+        }
 
         // Supply date (KSA-5) for standard
         if ($isStandard) {
@@ -194,34 +197,22 @@ final class InvoiceDocument
 
         $grossTotal = $netTotal + $vatTotal;
 
-        /* ================= ADDITIONAL DOC REF (Phase 2) =================
-           Place ADRs before totals/lines to satisfy UBL ordering.
-        */
-
-        // ICV (KSA-16)
-        $adrIcv = $x->add($inv, 'cac:AdditionalDocumentReference');
-        $x->add($adrIcv, 'cbc:ID', 'ICV');
-        $x->add($adrIcv, 'cbc:UUID', (string)$invoiceCounter);
-
-        // PIH (KSA-13)
-        $adrPih = $x->add($inv, 'cac:AdditionalDocumentReference');
-        $x->add($adrPih, 'cbc:ID', 'PIH');
-        $att = $x->add($adrPih, 'cac:Attachment');
-        $x->add($att, 'cbc:EmbeddedDocumentBinaryObject', $pihB64, ['mimeCode' => 'text/plain']);
-
         /* ================= TAX TOTAL (BG-23 required) ================= */
         $taxTotal = $x->add($inv, 'cac:TaxTotal');
         $x->add($taxTotal, 'cbc:TaxAmount', $x->money($vatTotal), ['currencyID' => $currency]);
 
-        $sub = $x->add($taxTotal, 'cac:TaxSubtotal');
-        $x->add($sub, 'cbc:TaxableAmount', $x->money($netTotal), ['currencyID' => $currency]);
-        $x->add($sub, 'cbc:TaxAmount', $x->money($vatTotal), ['currencyID' => $currency]);
+        // BR-KSA-EN16931-09: when TaxCurrencyCode present, omit TaxSubtotal
+        if ($taxCurrency === null || $taxCurrency === $currency) {
+            $sub = $x->add($taxTotal, 'cac:TaxSubtotal');
+            $x->add($sub, 'cbc:TaxableAmount', $x->money($netTotal), ['currencyID' => $currency]);
+            $x->add($sub, 'cbc:TaxAmount', $x->money($vatTotal), ['currencyID' => $currency]);
 
-        $cat = $x->add($sub, 'cac:TaxCategory');
-        $x->add($cat, 'cbc:ID', 'S');
-        $x->add($cat, 'cbc:Percent', $this->formatPercent($taxRate));
-        $catTs = $x->add($cat, 'cac:TaxScheme');
-        $x->add($catTs, 'cbc:ID', 'VAT');
+            $cat = $x->add($sub, 'cac:TaxCategory');
+            $x->add($cat, 'cbc:ID', 'S');
+            $x->add($cat, 'cbc:Percent', $this->formatPercent($taxRate));
+            $catTs = $x->add($cat, 'cac:TaxScheme');
+            $x->add($catTs, 'cbc:ID', 'VAT');
+        }
 
         /* ================= LEGAL MONETARY TOTAL ================= */
         $legal = $x->add($inv, 'cac:LegalMonetaryTotal');
@@ -234,6 +225,19 @@ final class InvoiceDocument
         foreach ($lines as $line) {
             $inv->appendChild($line);
         }
+
+        /* ================= ADDITIONAL DOC REF (Phase 2) ================= */
+
+        // ICV (KSA-16)
+        $adrIcv = $x->add($inv, 'cac:AdditionalDocumentReference');
+        $x->add($adrIcv, 'cbc:ID', 'ICV');
+        $x->add($adrIcv, 'cbc:UUID', (string)$invoiceCounter);
+
+        // PIH (KSA-13)
+        $adrPih = $x->add($inv, 'cac:AdditionalDocumentReference');
+        $x->add($adrPih, 'cbc:ID', 'PIH');
+        $att = $x->add($adrPih, 'cac:Attachment');
+        $x->add($att, 'cbc:EmbeddedDocumentBinaryObject', $pihB64, ['mimeCode' => 'text/plain']);
 
         // Finalize doc
         $x->doc()->appendChild($inv);
