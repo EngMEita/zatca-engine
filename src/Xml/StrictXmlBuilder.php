@@ -114,11 +114,11 @@ final class StrictXmlBuilder
         $this->add($pa, 'cbc:StreetName', $street);
         $this->add($pa, 'cbc:BuildingNumber', $bno);
         $this->add($pa, 'cbc:CityName', $city);
+        $this->add($pa, 'cbc:PostalZone', $postal);
 
-        // ✅ Correct element name
+        // Keep UBL ordering: District appears after PostalZone
         $this->add($pa, 'cbc:District', $district);
 
-        $this->add($pa, 'cbc:PostalZone', $postal);
         $c = $this->add($pa, 'cac:Country');
         $this->add($c, 'cbc:IdentificationCode', strtoupper($country));
 

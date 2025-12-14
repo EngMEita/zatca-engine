@@ -79,7 +79,8 @@ final class InvoiceDocument
         $x->add($pn, 'cbc:Name', $sellerName);
 
         // ✅ PostalAddress must exist + District (no CitySubdivisionName)
-        $x->addPostalAddress($p, $sAddr, 'SA', true);
+        $sellerCountry = strtoupper((string)($sAddr['country'] ?? 'SA'));
+        $x->addPostalAddress($p, $sAddr, $sellerCountry, true);
 
         // PartyTaxScheme (VAT)
         $pts = $x->add($p, 'cac:PartyTaxScheme');
@@ -104,7 +105,9 @@ final class InvoiceDocument
 
             // Buyer address (ZATCA KSA-63)
             $bAddr = $this->m->buyerAddress ?? [];
-            $x->addPostalAddress($cp, $bAddr, 'SA', true);
+            $buyerCountry = strtoupper((string)($bAddr['country'] ?? 'SA'));
+            $requireBuyerDistrict = ($buyerCountry === 'SA');
+            $x->addPostalAddress($cp, $bAddr, $buyerCountry, $requireBuyerDistrict);
 
             // Buyer VAT or Buyer ID (BR-KSA-81)
             $buyerVat = trim((string)($this->m->buyerVat ?? ''));
@@ -194,16 +197,6 @@ final class InvoiceDocument
         /* ================= TAX TOTAL (BG-23 required) ================= */
         $taxTotal = $x->add($inv, 'cac:TaxTotal');
         $x->add($taxTotal, 'cbc:TaxAmount', $x->money($vatTotal), ['currencyID' => $currency]);
-
-        $sub = $x->add($taxTotal, 'cac:TaxSubtotal');
-        $x->add($sub, 'cbc:TaxableAmount', $x->money($netTotal), ['currencyID' => $currency]);
-        $x->add($sub, 'cbc:TaxAmount', $x->money($vatTotal), ['currencyID' => $currency]);
-
-        $cat = $x->add($sub, 'cac:TaxCategory');
-        $x->add($cat, 'cbc:ID', 'S');
-        $x->add($cat, 'cbc:Percent', $this->formatPercent($taxRate));
-        $catTs = $x->add($cat, 'cac:TaxScheme');
-        $x->add($catTs, 'cbc:ID', 'VAT');
 
         /* ================= LEGAL MONETARY TOTAL ================= */
         $legal = $x->add($inv, 'cac:LegalMonetaryTotal');

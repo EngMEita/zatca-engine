@@ -23,6 +23,9 @@ final class Phase2Validator
         $addr = $seller['address'] ?? [];
         if (empty($addr['street'])) $errors[] = ['code'=>'BT-35', 'message'=>'Seller street is required.', 'field'=>'Seller.Address.Street'];
         if (empty($addr['city']))   $errors[] = ['code'=>'BT-37', 'message'=>'Seller city is required.', 'field'=>'Seller.Address.City'];
+        if (empty($addr['postal_code'])) $errors[] = ['code'=>'BT-38', 'message'=>'Seller postal code is required.', 'field'=>'Seller.Address.PostalZone'];
+        if (empty($addr['district'])) $errors[] = ['code'=>'KSA-3', 'message'=>'Seller district is required.', 'field'=>'Seller.Address.District'];
+        if (empty($addr['country'] ?? 'SA')) $errors[] = ['code'=>'BT-40', 'message'=>'Seller country code is required.', 'field'=>'Seller.Address.Country'];
         if (empty($addr['building_no'])) $errors[] = ['code'=>'BR-KSA-37', 'message'=>'Seller building number is required (4 digits).', 'field'=>'Seller.Address.BuildingNumber'];
         if (!empty($addr['building_no'])) {
             try { ZatcaHelper::assertBuildingNumber((string)$addr['building_no']); }
@@ -34,10 +37,15 @@ final class Phase2Validator
             // Buyer address minimal in KSA
             if (empty($m->buyerAddress['street'] ?? '')) $errors[] = ['code'=>'BT-50', 'message'=>'Buyer street is required for standard invoices.', 'field'=>'Buyer.Address.Street'];
             if (empty($m->buyerAddress['city'] ?? ''))   $errors[] = ['code'=>'BT-52', 'message'=>'Buyer city is required for standard invoices.', 'field'=>'Buyer.Address.City'];
+            $buyerCountry = strtoupper((string)($m->buyerAddress['country'] ?? 'SA'));
+            $isBuyerSa = ($buyerCountry === 'SA');
+            if ($isBuyerSa && empty($m->buyerAddress['postal_code'] ?? '')) $errors[] = ['code'=>'BT-53', 'message'=>'Buyer postal code is required for standard invoices when country is SA.', 'field'=>'Buyer.Address.PostalZone'];
+            if ($isBuyerSa && empty($m->buyerAddress['district'] ?? '')) $errors[] = ['code'=>'KSA-4', 'message'=>'Buyer district is required for standard invoices when country is SA.', 'field'=>'Buyer.Address.District'];
+            if (empty($buyerCountry)) $errors[] = ['code'=>'BT-55', 'message'=>'Buyer country code is required for standard invoices.', 'field'=>'Buyer.Address.Country'];
             if (!empty($m->buyerAddress['building_no'] ?? '')) {
                 try { ZatcaHelper::assertBuildingNumber((string)$m->buyerAddress['building_no']); }
                 catch (\Throwable $e) { $errors[] = ['code'=>'BUYER-BUILD', 'message'=>$e->getMessage(), 'field'=>'Buyer.Address.BuildingNumber']; }
-            } else {
+            } elseif ($isBuyerSa) {
                 $errors[] = ['code'=>'Buyer-Building', 'message'=>'Buyer building number is required (4 digits) for standard invoices.', 'field'=>'Buyer.Address.BuildingNumber'];
             }
         }

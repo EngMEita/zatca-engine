@@ -1,15 +1,15 @@
 # meita/zatca-engine
 
-A **framework-agnostic** PHP engine for generating **ZATCA Phase 2** compliant e-invoices using **UBL 2.1**, with built-in validation, hashing, signing hooks, QR (TLV), and invoice chaining (ICV / PIH).
+A framework-agnostic PHP engine for generating ZATCA Phase 2 compliant e-invoices using UBL 2.1, with built-in validation, hashing, signing hooks, QR (TLV), and invoice chaining (ICV / PIH).
 
-> Target: produce XML that passes ZATCA simulator **without XSD errors** and is structured for Phase 2 flows (Clearance/Reporting).
+> Target: produce XML that passes ZATCA simulator without XSD errors and is structured for Phase 2 flows (Clearance/Reporting).
 
 ---
 
 ## Requirements
 
-- PHP **8.1+**
-- Extensions: `ext-dom`, `ext-openssl`
+- PHP 8.1+
+- Extensions: ext-dom, ext-openssl
 
 No runtime dependencies besides PHP extensions.
 
@@ -23,14 +23,15 @@ composer require meita/zatca-engine
 
 ---
 
-## Concepts
+## Checklist for valid Phase 2 XML
 
-### Context (multi-company)
-A `Context` holds company-specific configuration (seller identity, address, tax rate, environment, keys, etc.).
-You can create **multiple contexts at the same time** (multi-tenant / multi-company) without global config.
-
-### Engine
-`Engine` is the entry point. You create it with a `Context` and build invoices from it.
+- Currency must be SAR.
+- Seller: name, VAT, CRN (schemeID=CRN), and address with street, building_no (4 digits), city, district, postal_code, country.
+- Standard invoices: buyer name, buyer country code, and buyer VAT or buyer ID (scheme NAT by default if VAT is absent).
+- Buyer address (country = SA): street, building_no (4 digits), city, district, postal_code, country.
+- PostalAddress ordering follows UBL: PostalZone precedes District; no CitySubdivisionName.
+- Single TaxTotal at document level; line totals include VAT.
+- ICV (counter) and PIH (previous hash) included via AdditionalDocumentReference.
 
 ---
 
@@ -55,6 +56,7 @@ $ctx = Context::fromArray([
       'street' => 'Sudair Street',
       'building_no' => '4230',
       'city' => 'Riyadh',
+      'district' => 'Al Nadheem',
       'postal_code' => '12987',
       'country' => 'SA',
     ],
@@ -66,14 +68,22 @@ $engine = new Engine($ctx);
 $invoice = $engine->invoice()
   ->standard() // or ->simplified()
   ->number('INV-2025-0001')
+  ->counter(1)             // ICV (KSA-16)
+  ->previousHash(null)     // PIH (KSA-13) base64/hex; null auto-fills zeros for first invoice
   ->issueAt('2025-12-13', '09:26:57')
-  ->buyer('MohEita Company', '319123456700003', [
-      'street' => 'King Fahd Rd',
-      'building_no' => '1234',
-      'city' => 'Riyadh',
-      'postal_code' => '11564',
-      'country' => 'SA',
-  ])
+  ->supplyDate('2025-12-12')
+  ->buyer(
+      'MohEita Company',
+      [
+        'street' => 'King Fahd Rd',
+        'building_no' => '1234',
+        'city' => 'Riyadh',
+        'district' => 'Al Olaya',
+        'postal_code' => '11564',
+        'country' => 'SA',
+      ],
+      '319123456700003' // Buyer VAT (BT-48); if omitted, set buyerId instead
+  )
   ->addItem('Air Grill 25x25', 2, 100)
   ->addItem('Air Grill 30x30', 5, 120)
   ->addItem('Air Grill 50x50', 17, 165.15)
@@ -108,7 +118,18 @@ $engine = ZatcaEngine::company('dania');
 $xml = $engine->invoice()
   ->standard()
   ->number('INV-2025-0001')
-  ->buyer('Customer', '319...')
+  ->buyer(
+    'Customer',
+    [
+      'street' => 'Street',
+      'building_no' => '1234',
+      'city' => 'Riyadh',
+      'district' => 'District',
+      'postal_code' => '11564',
+      'country' => 'SA',
+    ],
+    '319...'
+  )
   ->addItem('Item A', 2, 100)
   ->build()
   ->toXml();
@@ -119,21 +140,20 @@ $xml = $engine->invoice()
 ## Validation (Phase 2 oriented)
 
 Before generating XML, the engine enforces common Phase 2 constraints:
-- UBL ordering for `LegalMonetaryTotal` (prevents XSD errors)
-- Line amounts include VAT (`TaxInclusiveAmount` per line)
-- `ClassifiedTaxCategory` is inside `Item`
-- Single `TaxTotal` at document level
-- Mandatory seller / buyer minimal fields
-- KSA building number format (4 digits) and address non-empty (for standard)
+- UBL ordering for LegalMonetaryTotal and PostalAddress (PostalZone before District)
+- Line amounts include VAT (TaxInclusiveAmount per line)
+- ClassifiedTaxCategory is inside Item
+- Single TaxTotal at document level (TaxSubtotal omitted when TaxCurrencyCode present)
+- Mandatory seller / buyer minimal fields, with KSA address rules when country is SA
+- Building number format (4 digits) and required ICV/PIH values
 
-If anything is invalid, `Phase2ValidationException` is thrown with a structured error list.
+If anything is invalid, Phase2ValidationException is thrown with a structured error list.
 
 ---
 
-## Extending / Integrating Signing & Clearance
+## Extending / Integrating Signing and Clearance
 
-The engine provides a native OpenSSL signing helper (ECDSA) as a building block.
-You can integrate your Clearance / Reporting HTTP client in your app without changing the core.
+The engine provides a native OpenSSL signing helper (ECDSA) as a building block. You can integrate your Clearance / Reporting HTTP client in your app without changing the core.
 
 ---
 
