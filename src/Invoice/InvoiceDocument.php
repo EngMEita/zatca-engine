@@ -22,7 +22,7 @@ final class InvoiceDocument
 
         $currency = $this->ctx->currency();
         $taxRate  = (float)$this->ctx->taxRate();
-        // BR-KSA-68: TaxCurrencyCode must exist; when present, BR-KSA-EN16931-09 requires no TaxSubtotal
+        // BR-KSA-68: TaxCurrencyCode must exist; include TaxSubtotal only when tax currency equals document currency
         $taxCurrency = $this->m->taxCurrencyCode ?? $currency;
 
         $seller = $this->ctx->seller();
@@ -154,8 +154,8 @@ final class InvoiceDocument
 
         /* ================= LINES (collect first, append later) ================= */
         $lines = [];
-        $netTotal = 0.0;
-        $vatTotal = 0.0;
+        $netTotalCents = 0;
+        $vatTotalCents = 0;
 
         foreach ($this->m->items as $i => $it) {
             $qty   = (float)($it['qty'] ?? 0);
@@ -168,13 +168,13 @@ final class InvoiceDocument
                 throw new InvalidArgumentException("Item #" . ($i + 1) . " price cannot be negative.");
             }
 
-            // Round per line to 2 decimals to avoid BR-CO-15 mismatches
-            $lineNet = round($qty * $price, 2);
-            $lineVat = round($lineNet * ($taxRate / 100), 2);
-            $lineGross = round($lineNet + $lineVat, 2);
+            // Work in cents to avoid float drift in totals
+            $lineNetCents = (int)round($qty * $price * 100);
+            $lineVatCents = (int)round($lineNetCents * ($taxRate / 100));
+            $lineGrossCents = $lineNetCents + $lineVatCents;
 
-            $netTotal += $lineNet;
-            $vatTotal += $lineVat;
+            $netTotalCents += $lineNetCents;
+            $vatTotalCents += $lineVatCents;
 
             // Build InvoiceLine
             $line = $x->el('cac:InvoiceLine');
@@ -184,15 +184,15 @@ final class InvoiceDocument
                 'unitCode' => (string)($it['unit_code'] ?? 'EA'),
             ]);
 
-            $x->add($line, 'cbc:LineExtensionAmount', $x->money($lineNet), [
+            $x->add($line, 'cbc:LineExtensionAmount', $x->money($lineNetCents / 100), [
                 'currencyID' => $currency,
             ]);
 
             // Line-level VAT amount (KSA-11)
             $lineTax = $x->add($line, 'cac:TaxTotal');
-            $x->add($lineTax, 'cbc:TaxAmount', $x->money($lineVat), ['currencyID' => $currency]);
+            $x->add($lineTax, 'cbc:TaxAmount', $x->money($lineVatCents / 100), ['currencyID' => $currency]);
             // Line amount with VAT (KSA-12)
-            $x->add($lineTax, 'cbc:RoundingAmount', $x->money($lineGross), ['currencyID' => $currency]);
+            $x->add($lineTax, 'cbc:RoundingAmount', $x->money($lineGrossCents / 100), ['currencyID' => $currency]);
 
             // Item + VAT category (BT-151)
             $itemEl = $x->add($line, 'cac:Item');
@@ -212,13 +212,26 @@ final class InvoiceDocument
             $lines[] = $line;
         }
 
-        $grossTotal = round($netTotal + $vatTotal, 2);
+        $netTotal = $netTotalCents / 100;
+        $vatTotal = $vatTotalCents / 100;
+        $grossTotal = ($netTotalCents + $vatTotalCents) / 100;
 
         /* ================= TAX TOTAL (BG-23 required) ================= */
         $taxTotal = $x->add($inv, 'cac:TaxTotal');
         $x->add($taxTotal, 'cbc:TaxAmount', $x->money($vatTotal), ['currencyID' => $currency]);
 
-        // BR-KSA-EN16931-09: when TaxCurrencyCode is provided, do not include TaxSubtotal (BG-23)
+        // Include BG-23 only when TaxCurrencyCode equals DocumentCurrencyCode
+        if ($taxCurrency === $currency) {
+            $sub = $x->add($taxTotal, 'cac:TaxSubtotal');
+            $x->add($sub, 'cbc:TaxableAmount', $x->money($netTotal), ['currencyID' => $currency]);
+            $x->add($sub, 'cbc:TaxAmount', $x->money($vatTotal), ['currencyID' => $currency]);
+
+            $cat = $x->add($sub, 'cac:TaxCategory');
+            $x->add($cat, 'cbc:ID', 'S');
+            $x->add($cat, 'cbc:Percent', $this->formatPercent($taxRate));
+            $catTs = $x->add($cat, 'cac:TaxScheme');
+            $x->add($catTs, 'cbc:ID', 'VAT');
+        }
 
         /* ================= LEGAL MONETARY TOTAL ================= */
         $legal = $x->add($inv, 'cac:LegalMonetaryTotal');
