@@ -23,6 +23,7 @@ final class InvoiceDocument
         $currency = $this->ctx->currency();
         $taxRate  = (float)$this->ctx->taxRate();
         $taxCurrency = $this->m->taxCurrencyCode ?? $currency;
+        $hasTaxCurrencyOverride = $this->m->taxCurrencyCode !== null && $taxCurrency !== $currency;
 
         $seller = $this->ctx->seller();
         $sAddr  = $seller['address'] ?? [];
@@ -66,14 +67,8 @@ final class InvoiceDocument
         $x->add($inv, 'cbc:DocumentCurrencyCode', $currency);
         $x->add($inv, 'cbc:TaxCurrencyCode', $taxCurrency); // BR-KSA-68 requires presence
 
-        // Supply date (KSA-5) for standard
-        if ($isStandard) {
-            $period = $x->add($inv, 'cac:InvoicePeriod');
-            $x->add($period, 'cbc:StartDate', $this->m->supplyDate ?? $this->m->issueDate);
-        }
-
         /* ================= ADDITIONAL DOC REF (Phase 2) =================
-           Place ADRs before parties/totals/lines to satisfy UBL ordering.
+           Place ADRs immediately after currency codes (before periods/parties/totals/lines) to satisfy UBL ordering.
         */
 
         // ICV (KSA-16)
@@ -86,6 +81,12 @@ final class InvoiceDocument
         $x->add($adrPih, 'cbc:ID', 'PIH');
         $att = $x->add($adrPih, 'cac:Attachment');
         $x->add($att, 'cbc:EmbeddedDocumentBinaryObject', $pihB64, ['mimeCode' => 'text/plain']);
+
+        // Supply date (KSA-5) for standard
+        if ($isStandard) {
+            $period = $x->add($inv, 'cac:InvoicePeriod');
+            $x->add($period, 'cbc:StartDate', $this->m->supplyDate ?? $this->m->issueDate);
+        }
 
         /* ================= SUPPLIER ================= */
         $sup = $x->add($inv, 'cac:AccountingSupplierParty');
@@ -166,9 +167,10 @@ final class InvoiceDocument
                 throw new InvalidArgumentException("Item #" . ($i + 1) . " price cannot be negative.");
             }
 
-            $lineNet = $qty * $price;
-            $lineVat = $lineNet * ($taxRate / 100);
-            $lineGross = $lineNet + $lineVat;
+            // Round per line to 2 decimals to avoid BR-CO-15 mismatches
+            $lineNet = round($qty * $price, 2);
+            $lineVat = round($lineNet * ($taxRate / 100), 2);
+            $lineGross = round($lineNet + $lineVat, 2);
 
             $netTotal += $lineNet;
             $vatTotal += $lineVat;
@@ -184,11 +186,6 @@ final class InvoiceDocument
             $x->add($line, 'cbc:LineExtensionAmount', $x->money($lineNet), [
                 'currencyID' => $currency,
             ]);
-
-            // KSA-11 + KSA-12
-            $lineTax = $x->add($line, 'cac:TaxTotal');
-            $x->add($lineTax, 'cbc:TaxAmount', $x->money($lineVat), ['currencyID' => $currency]);
-            $x->add($lineTax, 'cbc:RoundingAmount', $x->money($lineGross), ['currencyID' => $currency]);
 
             // Item + VAT category (BT-151)
             $itemEl = $x->add($line, 'cac:Item');
@@ -208,29 +205,14 @@ final class InvoiceDocument
             $lines[] = $line;
         }
 
-        $grossTotal = $netTotal + $vatTotal;
-
-        /* ================= ADDITIONAL DOC REF (Phase 2) =================
-           Place ADRs early (before parties/totals/lines) to satisfy UBL ordering.
-        */
-
-        // ICV (KSA-16)
-        $adrIcv = $x->add($inv, 'cac:AdditionalDocumentReference');
-        $x->add($adrIcv, 'cbc:ID', 'ICV');
-        $x->add($adrIcv, 'cbc:UUID', (string)$invoiceCounter);
-
-        // PIH (KSA-13)
-        $adrPih = $x->add($inv, 'cac:AdditionalDocumentReference');
-        $x->add($adrPih, 'cbc:ID', 'PIH');
-        $att = $x->add($adrPih, 'cac:Attachment');
-        $x->add($att, 'cbc:EmbeddedDocumentBinaryObject', $pihB64, ['mimeCode' => 'text/plain']);
+        $grossTotal = round($netTotal + $vatTotal, 2);
 
         /* ================= TAX TOTAL (BG-23 required) ================= */
         $taxTotal = $x->add($inv, 'cac:TaxTotal');
         $x->add($taxTotal, 'cbc:TaxAmount', $x->money($vatTotal), ['currencyID' => $currency]);
 
-        // BR-KSA-EN16931-09: when TaxCurrencyCode is present, omit TaxSubtotal
-        if ($taxCurrency === null) {
+        // BR-KSA-EN16931-09 interpretation: if tax currency differs, omit TaxSubtotal; otherwise include BG-23
+        if (!$hasTaxCurrencyOverride) {
             $sub = $x->add($taxTotal, 'cac:TaxSubtotal');
             $x->add($sub, 'cbc:TaxableAmount', $x->money($netTotal), ['currencyID' => $currency]);
             $x->add($sub, 'cbc:TaxAmount', $x->money($vatTotal), ['currencyID' => $currency]);
