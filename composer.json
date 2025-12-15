@@ -1,12 +1,19 @@
 {
   "name": "meita/zatca-engine",
   "description": "Framework-agnostic ZATCA Phase 2 engine for generating UBL 2.1 e-invoices (XML, hashing, signing, QR, chaining).",
+  "keywords": [
+    "zatca",
+    "e-invoice",
+    "ubl",
+    "qr-code",
+    "php-library"
+  ],
   "type": "library",
   "license": "MIT",
   "authors": [
     {
-      "name": "Mohamed Adel Eita",
-      "email": "contact@mohammedadel.com"
+      "name": "Eng. Mohamed A. Eita",
+      "email": "maa1987@hotmail.com"
     }
   ],
   "require": {
